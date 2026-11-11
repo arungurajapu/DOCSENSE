@@ -1,0 +1,100 @@
+
+name: Agent Task
+description: A clearly scoped task assigned to an AI agent.
+title: "[AGENT] "
+labels: ["ready"]
+body:
+  - type: dropdown
+    id: agent_role
+    attributes:
+      label: Responsible Agent
+      options:
+        - Architect
+        - Backend
+        - Frontend
+        - QA
+        - Reviewer
+    validations:
+      required: true
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: Task Objective
+      description: What exactly needs to be accomplished?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Relevant architecture, existing behaviour and background.
+    validations:
+      required: true
+
+  - type: textarea
+    id: allowed_files
+    attributes:
+      label: Files Allowed to Modify
+      description: List files or directories this agent owns.
+      placeholder: |
+        backend/app/api/
+        backend/tests/
+    validations:
+      required: true
+
+  - type: textarea
+    id: forbidden_files
+    attributes:
+      label: Files Not Allowed to Modify
+      description: Files owned by other agents or protected files.
+    validations:
+      required: false
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Other issues or tasks that must be completed first.
+    validations:
+      required: false
+
+  - type: textarea
+    id: contract
+    attributes:
+      label: Interface Contract
+      description: API schemas, function signatures or shared interfaces.
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Conditions that must be satisfied to close this task.
+    validations:
+      required: true
+
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing Requirements
+      description: Tests the agent must implement and execute.
+    validations:
+      required: true
+
+  - type: textarea
+    id: handoff
+    attributes:
+      label: Handoff Requirements
+      description: What the agent must report when completing the task.
+      value: |
+        - Summary of changes
+        - Files modified
+        - Tests executed and results
+        - Branch name
+        - Pull request link
+        - Remaining issues
+    validations:
+      required: true
