@@ -55,7 +55,7 @@ Milestone 1 persists metadata in local SQLite (`DATABASE_URL`) and vectors in em
   - `PRAGMA foreign_keys=ON;` (enforces `ON DELETE CASCADE` from `documents` to `document_chunks`)
   - `PRAGMA busy_timeout=5000;` (mitigates short SQLite write contention)
 - `PRAGMA journal_mode=WAL;` is executed **once** at startup inside `init_db(engine)` on file-backed SQLite databases (skipped for `:memory:`), avoiding lock/race overhead on every new connection.
-- Timestamp columns use [`UTCDateTime`](file:///E:/Docsense-worktrees/issue-1/backend/app/db/types.py) so all persisted values are normalized to UTC and restored with `tzinfo=datetime.UTC` when SQLite returns naive datetimes.
+- Timestamp columns use `UTCDateTime` (`backend/app/db/types.py`) so all persisted values are normalized to UTC and restored with `tzinfo=datetime.UTC` when SQLite returns naive datetimes.
 
 ### In-Process Synchronization Scope
 - Embedded `chromadb.PersistentClient` is **not** multi-process safe on Windows NTFS.
@@ -75,18 +75,21 @@ DocSense pins `requires-python = ">=3.12,<3.13"` because key ML/vector dependenc
 Run from `backend/`:
 
 ```powershell
-# 1. Create virtual environment explicitly with Python 3.12.10
-C:\Users\arun\AppData\Local\Programs\Python\Python312\python.exe -m venv .venv
-.\.venv\Scripts\python.exe -V  # Expected: Python 3.12.10
+# 1. Create virtual environment explicitly with Python 3.12
+py -3.12 -m venv .venv
+# Or, if Python Launcher is not configured, specify the Python 3.12 executable directly:
+# <path-to-python-3.12> -m venv .venv
+.\.venv\Scripts\python.exe -V  # Expected: Python 3.12.x (verified on 3.12.10)
 
-# 2. Install locked dependencies (guarantees CPU-only PyTorch) + editable package
+# 2. Canonical install from committed lockfile (guarantees exact versions + CPU-only PyTorch)
 .\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
 .\.venv\Scripts\python.exe -m pip install -r requirements.lock
 .\.venv\Scripts\python.exe -m pip install --no-deps -e .
 .\.venv\Scripts\python.exe -m pip check
 
-# (Optional direct pyproject install without lockfile, forcing CPU PyTorch wheel index)
-# .\.venv\Scripts\python.exe -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -e ".[dev]"
+# Non-lockfile manual procedure (install CPU-only PyTorch strictly via --index-url first, NOT --extra-index-url):
+# .\.venv\Scripts\python.exe -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.15,<2.16"
+# .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 
 # 3. Export frozen OpenAPI contract
 .\.venv\Scripts\python.exe scripts\export_openapi.py

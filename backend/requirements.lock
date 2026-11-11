@@ -1,4 +1,4 @@
-﻿# Reproducible Python 3.12.10 (Windows x64 + CPU-only PyTorch) lockfile for DocSense backend.
+# Reproducible Python 3.12.10 (Windows x64 + CPU-only PyTorch) lockfile for DocSense backend.
 # Install verbatim with:
 #   .\.venv\Scripts\python.exe -m pip install -r requirements.lock
 #   .\.venv\Scripts\python.exe -m pip install --no-deps -e .
