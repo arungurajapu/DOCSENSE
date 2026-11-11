@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import APIRouter, FastAPI, File, Query, Response, UploadFile
 from fastapi import Path as ApiPath
@@ -121,8 +122,8 @@ def build_contract_app() -> FastAPI:
     )
     async def get_document(
         document_id: Annotated[
-            str,
-            ApiPath(min_length=1, max_length=64, description="Document ID"),
+            UUID,
+            ApiPath(description="Document UUID"),
         ],
     ) -> DocumentResponse:
         raise NotImplementedError("Contract-only stub")
@@ -142,8 +143,8 @@ def build_contract_app() -> FastAPI:
     )
     async def reprocess_document(
         document_id: Annotated[
-            str,
-            ApiPath(min_length=1, max_length=64, description="Document ID"),
+            UUID,
+            ApiPath(description="Document UUID"),
         ],
     ) -> DocumentResponse:
         raise NotImplementedError("Contract-only stub")
@@ -164,8 +165,8 @@ def build_contract_app() -> FastAPI:
     )
     async def delete_document(
         document_id: Annotated[
-            str,
-            ApiPath(min_length=1, max_length=64, description="Document ID"),
+            UUID,
+            ApiPath(description="Document UUID"),
         ],
     ) -> Response:
         raise NotImplementedError("Contract-only stub")

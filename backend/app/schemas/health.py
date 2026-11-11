@@ -1,9 +1,10 @@
 """Health check response schema."""
 
-from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel
+
+from app.schemas.types import UTCDatetime
 
 
 class HealthResponse(BaseModel):
@@ -14,4 +15,4 @@ class HealthResponse(BaseModel):
     database: Literal["ok", "error"]
     vector_store: Literal["ok", "error"]
     embedding_model_loaded: bool
-    timestamp: datetime
+    timestamp: UTCDatetime

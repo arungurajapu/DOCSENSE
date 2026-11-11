@@ -12,6 +12,7 @@ from fastapi import UploadFile
 class SavedFileResult:
     """Metadata returned after validating and persisting an uploaded PDF."""
 
+    filename: str  # Sanitized display filename (<= 255 chars)
     storage_path: str
     sha256_hash: str
     file_size_bytes: int
@@ -92,10 +93,20 @@ class VectorStore(Protocol):
         filename: str,
         chunks: Sequence[TextChunk],
         embeddings: Sequence[Sequence[float]],
-    ) -> None: ...
+    ) -> None:
+        """Upsert chunk vectors idempotently under ID ``"{document_id}:{chunk_index}"``.
+
+        Metadata values must use ChromaDB-compatible scalars only (``str``, ``int``,
+        ``float``, ``bool``).
+        """
+        ...
 
     def delete_document(self, document_id: str) -> None: ...
 
     def count_by_document(self, document_id: str) -> int: ...
 
     def health_check(self) -> bool: ...
+
+    def close(self) -> None:
+        """Release underlying embedded ChromaDB handles on app shutdown or test teardown."""
+        ...

@@ -4,6 +4,7 @@ from app.models.document import DocumentStatus
 from app.schemas.document import DocumentListResponse, DocumentResponse
 from app.schemas.errors import ErrorDetail, ErrorResponse
 from app.schemas.health import HealthResponse
+from app.schemas.types import UTCDatetime
 
 __all__ = [
     "DocumentListResponse",
@@ -12,4 +13,5 @@ __all__ = [
     "ErrorDetail",
     "ErrorResponse",
     "HealthResponse",
+    "UTCDatetime",
 ]

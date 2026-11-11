@@ -16,6 +16,7 @@ def test_settings(tmp_path: Path) -> Settings:
     """Create isolated Settings pointing all persistence directories into tmp_path."""
     db_file = tmp_path / "db" / "docsense_test.db"
     return Settings(
+        _env_file=None,
         DATABASE_URL=f"sqlite:///{db_file.as_posix()}",
         CHROMA_PERSIST_DIR=str(tmp_path / "chroma"),
         UPLOAD_DIR=str(tmp_path / "uploads"),

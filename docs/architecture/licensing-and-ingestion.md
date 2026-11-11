@@ -21,7 +21,7 @@ On Windows NTFS, open file handles prevent immediate deletion or overwrite (`Per
 
 ---
 
-## 2. Model-Aligned Token Chunking & Cross-Page Provenance
+## 2. Model-Aligned Token Chunking, Provenance & Vector IDs
 
 ### Tokenizer Alignment (`all-MiniLM-L6-v2`)
 - **Configured Model**: `sentence-transformers/all-MiniLM-L6-v2` (`384`-dimensional embeddings, `MODEL_MAX_SEQ_LENGTH = 256`).
@@ -37,8 +37,12 @@ On Windows NTFS, open file handles prevent immediate deletion or overwrite (`Per
 3. Any page whose character interval overlaps `[char_start, char_end)` contributes to provenance:
    - `page_number`: first overlapping 1-based page number.
    - `page_end`: last overlapping 1-based page number.
-   - `page_numbers_csv`: comma-separated scalar page list (e.g., `"2,3"`).
+   - `page_numbers_csv`: comma-separated scalar page list (e.g., `"2,3"`), persisted as unbounded `Text` in SQLite (`document_chunks.page_numbers_csv`).
 4. **ChromaDB Metadata Scalar Constraint**: Embedded ChromaDB rejects list/array metadata values. Storing `page_number: int`, `page_end: int`, and `page_numbers_csv: str` preserves exact multi-page provenance in both SQLite (`document_chunks`) and ChromaDB (`docsense_chunks`).
+
+### Deterministic ChromaDB Vector IDs & Handle Lifecycle
+- **Deterministic Vector ID Format**: Every chunk stored in SQLite (`document_chunks.chroma_id`) and upserted to ChromaDB (`VectorStore.upsert_chunks`) MUST use the deterministic ID format `"{document_id}:{chunk_index}"` (for example, `"550e8400-e29b-41d4-a716-446655440000:0"`). This makes ingestion and reprocessing idempotent across retries without creating duplicate vectors.
+- **`VectorStore.close()` Lifecycle**: Embedded `chromadb.PersistentClient` holds SQLite/HNSW file handles on Windows NTFS. `VectorStore.close()` MUST be invoked during FastAPI `lifespan` shutdown and test fixture teardown so OS handles release cleanly before directory cleanup or process exit.
 
 ---
 
@@ -51,20 +55,23 @@ Milestone 1 persists metadata in local SQLite (`DATABASE_URL`) and vectors in em
   - `PRAGMA foreign_keys=ON;` (enforces `ON DELETE CASCADE` from `documents` to `document_chunks`)
   - `PRAGMA busy_timeout=5000;` (mitigates short SQLite write contention)
 - `PRAGMA journal_mode=WAL;` is executed **once** at startup inside `init_db(engine)` on file-backed SQLite databases (skipped for `:memory:`), avoiding lock/race overhead on every new connection.
+- Timestamp columns use [`UTCDateTime`](file:///E:/Docsense-worktrees/issue-1/backend/app/db/types.py) so all persisted values are normalized to UTC and restored with `tzinfo=datetime.UTC` when SQLite returns naive datetimes.
 
 ### In-Process Synchronization Scope
 - Embedded `chromadb.PersistentClient` is **not** multi-process safe on Windows NTFS.
-- Ingestion/deletion coordination (`asyncio.Lock` per `document_id`, `threading.Event` cancellation signaling, and `threading.Lock` around ChromaDB I/O) is strictly **single-process**.
+- Ingestion/deletion coordination (`asyncio.Lock` per `document_id`, `threading.Event` cancellation signaling, and `threading.Lock` around ChromaDB I/O) is strictly **in-process**.
 - **Deployment Requirement**: Uvicorn MUST run with `--workers 1` (`uvicorn app.main:app --workers 1`). Scaling horizontally across multiple worker processes or hosts requires migrating to a shared RDBMS (e.g., PostgreSQL), distributed task queue + locking, and client-server ChromaDB (or dedicated vector service).
 
 ---
 
-## 4. Windows Python 3.12.10 Setup & Compatibility Gate
+## 4. Windows Python 3.12.10 Setup, CPU-Only PyTorch & Compatibility Gate
 
 ### Why Python 3.12 (`>=3.12,<3.13`)
 DocSense pins `requires-python = ">=3.12,<3.13"` because key ML/vector dependencies (`torch`, `chromadb`, `pymupdf`, `tokenizers`/`onnxruntime`) provide prebuilt Windows x64 (`AMD64`) binary wheels for Python 3.12, whereas newer Python releases (e.g., 3.14) lack full wheel coverage and trigger source compilation errors on Windows.
 
-### Local Verification Commands (Windows)
+### Reproducible CPU-Only Install Commands (Windows)
+`backend/requirements.lock` pins all exact verified runtime and dev dependencies for Python 3.12.10 with `--extra-index-url https://download.pytorch.org/whl/cpu` and `torch==2.15.0+cpu`, guaranteeing zero `nvidia-*` CUDA packages are pulled.
+
 Run from `backend/`:
 
 ```powershell
@@ -72,13 +79,19 @@ Run from `backend/`:
 C:\Users\arun\AppData\Local\Programs\Python\Python312\python.exe -m venv .venv
 .\.venv\Scripts\python.exe -V  # Expected: Python 3.12.10
 
-# 2. Install backend + dev extras and check dependency integrity
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+# 2. Install locked dependencies (guarantees CPU-only PyTorch) + editable package
+.\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+.\.venv\Scripts\python.exe -m pip install -r requirements.lock
+.\.venv\Scripts\python.exe -m pip install --no-deps -e .
 .\.venv\Scripts\python.exe -m pip check
+
+# (Optional direct pyproject install without lockfile, forcing CPU PyTorch wheel index)
+# .\.venv\Scripts\python.exe -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -e ".[dev]"
 
 # 3. Export frozen OpenAPI contract
 .\.venv\Scripts\python.exe scripts\export_openapi.py
 
-# 4. Execute foundation & Windows 6-package compatibility test suite
+# 4. Run linter & foundation + Windows 6-package compatibility test suite
+.\.venv\Scripts\ruff.exe check .
 .\.venv\Scripts\pytest.exe -v
 ```

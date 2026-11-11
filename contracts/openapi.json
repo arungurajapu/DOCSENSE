@@ -56,7 +56,6 @@
         "description": "Serialized document metadata and ingestion status.",
         "properties": {
           "chunk_count": {
-            "default": 0,
             "minimum": 0.0,
             "title": "Chunk Count",
             "type": "integer"
@@ -91,6 +90,7 @@
             "type": "string"
           },
           "id": {
+            "format": "uuid",
             "title": "Id",
             "type": "string"
           },
@@ -126,6 +126,9 @@
           "file_size_bytes",
           "sha256_hash",
           "status",
+          "error_message",
+          "page_count",
+          "chunk_count",
           "created_at",
           "updated_at"
         ],
@@ -395,14 +398,13 @@
         "operationId": "delete_document",
         "parameters": [
           {
-            "description": "Document ID",
+            "description": "Document UUID",
             "in": "path",
             "name": "document_id",
             "required": true,
             "schema": {
-              "description": "Document ID",
-              "maxLength": 64,
-              "minLength": 1,
+              "description": "Document UUID",
+              "format": "uuid",
               "title": "Document Id",
               "type": "string"
             }
@@ -452,14 +454,13 @@
         "operationId": "get_document",
         "parameters": [
           {
-            "description": "Document ID",
+            "description": "Document UUID",
             "in": "path",
             "name": "document_id",
             "required": true,
             "schema": {
-              "description": "Document ID",
-              "maxLength": 64,
-              "minLength": 1,
+              "description": "Document UUID",
+              "format": "uuid",
               "title": "Document Id",
               "type": "string"
             }
@@ -508,14 +509,13 @@
         "operationId": "reprocess_document",
         "parameters": [
           {
-            "description": "Document ID",
+            "description": "Document UUID",
             "in": "path",
             "name": "document_id",
             "required": true,
             "schema": {
-              "description": "Document ID",
-              "maxLength": 64,
-              "minLength": 1,
+              "description": "Document UUID",
+              "format": "uuid",
               "title": "Document Id",
               "type": "string"
             }

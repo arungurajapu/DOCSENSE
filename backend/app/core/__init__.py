@@ -1,6 +1,6 @@
 """Core configuration and exception primitives for DocSense."""
 
-from app.core.config import Settings, get_settings, settings
+from app.core.config import BACKEND_DIR, REPO_ROOT, Settings, get_settings, settings
 from app.core.exceptions import (
     BadRequestError,
     DocSenseError,
@@ -19,6 +19,7 @@ from app.core.exceptions import (
 )
 
 __all__ = [
+    "BACKEND_DIR",
     "BadRequestError",
     "DocSenseError",
     "DocumentConflictError",
@@ -28,6 +29,7 @@ __all__ = [
     "EncryptedPDFError",
     "ExtractionError",
     "FileTooLargeError",
+    "REPO_ROOT",
     "ServiceUnavailableError",
     "Settings",
     "StorageError",

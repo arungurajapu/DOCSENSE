@@ -2,19 +2,50 @@
 
 import json
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Any
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 SPECIAL_TOKEN_RESERVE = 2  # [CLS] and [SEP] added by all-MiniLM-L6-v2 WordPiece tokenizer
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+REPO_ROOT = BACKEND_DIR.parent
+
+
+def _resolve_backend_path(value: str) -> str:
+    """Normalize relative filesystem paths against canonical BACKEND_DIR."""
+    path = Path(value)
+    if path.is_absolute() or value.startswith(("/", "\\")):
+        return str(path)
+    return str((BACKEND_DIR / path).resolve())
+
+
+def _resolve_database_url(value: str) -> str:
+    """Normalize relative file-backed SQLite URLs against canonical BACKEND_DIR."""
+    stripped = value.strip()
+    if not stripped.lower().startswith("sqlite:///"):
+        return stripped
+    raw_target = stripped[len("sqlite:///") :]
+    path_part, sep, query_part = raw_target.partition("?")
+    if (
+        not path_part
+        or path_part == ":memory:"
+        or path_part.startswith("file:")
+        or "mode=memory" in query_part.lower()
+        or path_part.startswith(("/", "\\"))
+        or Path(path_part).is_absolute()
+    ):
+        return stripped
+    resolved = (BACKEND_DIR / path_part).resolve()
+    return f"sqlite:///{resolved.as_posix()}{sep}{query_part}"
 
 
 class Settings(BaseSettings):
-    """Typed runtime settings with chunk/token budget safety validation."""
+    """Typed runtime settings with CWD-independent paths and chunk/token safety validation."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(REPO_ROOT / ".env", BACKEND_DIR / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -40,6 +71,16 @@ class Settings(BaseSettings):
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ]
+
+    @field_validator("CHROMA_PERSIST_DIR", "UPLOAD_DIR", mode="after")
+    @classmethod
+    def _normalize_data_dirs(cls, value: str) -> str:
+        return _resolve_backend_path(value)
+
+    @field_validator("DATABASE_URL", mode="after")
+    @classmethod
+    def _normalize_database_url(cls, value: str) -> str:
+        return _resolve_database_url(value)
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

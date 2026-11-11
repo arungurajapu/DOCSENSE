@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import gc
+import importlib.metadata as importlib_metadata
 import json
 import os
 import shutil
 import sys
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,7 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 
-from app.core.config import Settings
+from app.core.config import BACKEND_DIR, Settings
 from app.core.exceptions import (
     BadRequestError,
     DocSenseError,
@@ -56,7 +57,7 @@ from app.services.interfaces import (
 from scripts.export_openapi import DEFAULT_OUTPUT_PATH, export_openapi
 
 # ---------------------------------------------------------------------------
-# 1. SQLite Connection Pragma, WAL Initialization, and ON DELETE CASCADE Tests
+# 1. SQLite Connection Pragma, WAL Initialization, UTC, and ON DELETE CASCADE
 # ---------------------------------------------------------------------------
 
 
@@ -87,7 +88,7 @@ def test_sqlite_multi_connection_pragmas_and_no_wal_in_connect_listener(tmp_path
 
 
 def test_init_db_sets_wal_once_on_file_sqlite_and_skips_memory(tmp_path: Path) -> None:
-    """Verify init_db creates schema tables and enables WAL on file-backed SQLite only."""
+    """Verify init_db sets WAL on file-backed SQLite and >=2 new connections preserve pragmas."""
     db_path = tmp_path / "nested" / "wal_init.db"
     file_engine = create_db_engine(f"sqlite:///{db_path.as_posix()}")
     try:
@@ -97,9 +98,16 @@ def test_init_db_sets_wal_once_on_file_sqlite_and_skips_memory(tmp_path: Path) -
         table_names = set(inspect(file_engine).get_table_names())
         assert {"documents", "document_chunks"}.issubset(table_names)
 
-        with file_engine.connect() as conn:
-            journal_mode = str(conn.execute(text("PRAGMA journal_mode;")).scalar_one()).lower()
-            assert journal_mode == "wal"
+        # Open >=2 distinct connections AFTER init_db() and verify WAL + per-connection pragmas.
+        with file_engine.connect() as conn1, file_engine.connect() as conn2:
+            assert conn1.connection.dbapi_connection is not conn2.connection.dbapi_connection
+            for idx, conn in enumerate((conn1, conn2), start=1):
+                journal_mode = str(conn.execute(text("PRAGMA journal_mode;")).scalar_one()).lower()
+                fk = conn.execute(text("PRAGMA foreign_keys;")).scalar_one()
+                busy = conn.execute(text("PRAGMA busy_timeout;")).scalar_one()
+                assert journal_mode == "wal", f"Connection {idx}: expected wal, got {journal_mode}"
+                assert fk == 1, f"Connection {idx}: expected foreign_keys=1, got {fk}"
+                assert busy == 5000, f"Connection {idx}: expected busy_timeout=5000, got {busy}"
     finally:
         file_engine.dispose()
 
@@ -113,13 +121,84 @@ def test_init_db_sets_wal_once_on_file_sqlite_and_skips_memory(tmp_path: Path) -
         memory_engine.dispose()
 
 
+def test_utc_datetime_persistence_and_pydantic_iso8601_serialization(tmp_path: Path) -> None:
+    """Verify UTCDateTime persists/restores UTC across SQLite sessions and serializes ISO UTC."""
+    db_path = tmp_path / "utc_roundtrip.db"
+    engine = create_db_engine(f"sqlite:///{db_path.as_posix()}")
+    init_db(engine)
+
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    created_ist = datetime(2026, 11, 11, 16, 0, 0, tzinfo=ist_tz)
+    expected_utc = datetime(2026, 11, 11, 10, 30, 0, tzinfo=UTC)
+    doc_id = str(uuid.uuid4())
+    session_factory = create_session_factory(engine)
+
+    try:
+        session = session_factory()
+        try:
+            session.add(
+                Document(
+                    id=doc_id,
+                    filename="utc_test.pdf",
+                    content_type="application/pdf",
+                    file_size_bytes=512,
+                    sha256_hash="f" * 64,
+                    storage_path=f"data/uploads/{doc_id}.pdf",
+                    status=DocumentStatus.PENDING.value,
+                    created_at=created_ist,
+                    updated_at=created_ist,
+                )
+            )
+            session.commit()
+        finally:
+            session.close()
+
+        # Reload in a brand-new SQLAlchemy session to verify SQLite read-path UTC restoration.
+        with session_factory() as reload_session:
+            reloaded = reload_session.get(Document, doc_id)
+            assert reloaded is not None
+            assert reloaded.created_at.tzinfo is UTC
+            assert reloaded.updated_at.tzinfo is UTC
+            assert reloaded.created_at == expected_utc
+            assert reloaded.updated_at == expected_utc
+
+            doc_schema = DocumentResponse.model_validate(reloaded)
+            assert doc_schema.id == uuid.UUID(doc_id)
+            assert doc_schema.created_at.tzinfo is UTC
+            assert doc_schema.updated_at.tzinfo is UTC
+
+            serialized = json.loads(doc_schema.model_dump_json())
+            assert serialized["created_at"].endswith(("Z", "+00:00"))
+            assert serialized["updated_at"].endswith(("Z", "+00:00"))
+            assert datetime.fromisoformat(serialized["created_at"]) == expected_utc
+
+        # Verify HealthResponse also normalizes naive and non-UTC datetimes to explicit UTC.
+        naive_dt = datetime(2026, 11, 11, 10, 30, 0)
+        health = HealthResponse(
+            status="ok",
+            version="0.1.0",
+            database="ok",
+            vector_store="ok",
+            embedding_model_loaded=True,
+            timestamp=naive_dt,
+        )
+        assert health.timestamp.tzinfo is UTC
+        health_json = json.loads(health.model_dump_json())
+        assert health_json["timestamp"].endswith(("Z", "+00:00"))
+    finally:
+        engine.dispose()
+
+
 def test_raw_sql_delete_document_cascades_to_chunks(tmp_path: Path) -> None:
-    """Verify raw SQL DELETE FROM documents WHERE id=:id cascades to document_chunks."""
+    """Verify raw SQL DELETE FROM documents cascades and page_numbers_csv stores >255 chars."""
     db_path = tmp_path / "cascade.db"
     engine = create_db_engine(f"sqlite:///{db_path.as_posix()}")
     init_db(engine)
 
     doc_id = str(uuid.uuid4())
+    long_pages_csv = ",".join(str(p) for p in range(1, 120))  # > 255 chars
+    assert len(long_pages_csv) > 255
+
     session_factory = create_session_factory(engine)
     try:
         with session_factory() as session:
@@ -131,7 +210,7 @@ def test_raw_sql_delete_document_cascades_to_chunks(tmp_path: Path) -> None:
                 sha256_hash="a" * 64,
                 storage_path=f"data/uploads/{doc_id}.pdf",
                 status=DocumentStatus.READY.value,
-                page_count=2,
+                page_count=120,
                 chunk_count=2,
             )
             session.add(doc)
@@ -155,8 +234,8 @@ def test_raw_sql_delete_document_cascades_to_chunks(tmp_path: Path) -> None:
                         document_id=doc_id,
                         chunk_index=1,
                         page_number=1,
-                        page_end=2,
-                        page_numbers_csv="1,2",
+                        page_end=119,
+                        page_numbers_csv=long_pages_csv,
                         token_count=140,
                         char_start=350,
                         char_end=900,
@@ -258,7 +337,7 @@ def test_document_status_check_constraint_and_chroma_id_uniqueness(
 
 
 # ---------------------------------------------------------------------------
-# 2. Config Bounds, Exceptions, Schemas, and Protocol Interfaces
+# 2. Config Bounds, CWD Independence, Exceptions, Schemas, and Protocols
 # ---------------------------------------------------------------------------
 
 
@@ -306,8 +385,43 @@ def test_config_defaults_and_token_budget_validation() -> None:
     assert cors_cfg.CORS_ORIGINS == ["http://localhost:3000", "https://app.example.com"]
 
 
+def test_config_cwd_independent_paths_and_env_isolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    test_settings: Settings,
+) -> None:
+    """Verify relative data paths resolve to BACKEND_DIR regardless of CWD and isolate .env."""
+    outside_dir = tmp_path / "outside_cwd"
+    outside_dir.mkdir()
+    (outside_dir / ".env").write_text(
+        "MAX_UPLOAD_SIZE_MB=99\nUPLOAD_DIR=./custom_uploads\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(outside_dir)
+
+    # Default Settings with _env_file=None still resolves relative paths to BACKEND_DIR.
+    cfg = Settings(_env_file=None)
+    assert cfg.UPLOAD_DIR == str((BACKEND_DIR / "data" / "uploads").resolve())
+    assert cfg.CHROMA_PERSIST_DIR == str((BACKEND_DIR / "data" / "chroma").resolve())
+    expected_db_url = f"sqlite:///{(BACKEND_DIR / 'data' / 'docsense.db').resolve().as_posix()}"
+    assert cfg.DATABASE_URL == expected_db_url
+    assert Settings(_env_file=None, DATABASE_URL="sqlite:///:memory:").DATABASE_URL == (
+        "sqlite:///:memory:"
+    )
+
+    # Fixture test_settings must remain isolated from any external .env file.
+    assert test_settings.MAX_UPLOAD_SIZE_MB == 25
+    assert test_settings.UPLOAD_DIR == str(tmp_path / "uploads")
+
+    # Explicit .env loading resolves relative overrides against BACKEND_DIR too.
+    loaded_cfg = Settings(_env_file=outside_dir / ".env")
+    assert loaded_cfg.MAX_UPLOAD_SIZE_MB == 99
+    assert loaded_cfg.UPLOAD_DIR == str((BACKEND_DIR / "custom_uploads").resolve())
+
+
 def test_exceptions_and_pydantic_v2_schemas() -> None:
-    """Verify domain exception payloads and Pydantic v2 schema serialization."""
+    """Verify domain exception payloads, required DocumentResponse keys, and UUID coercion."""
     cases: list[tuple[DocSenseError, int, str]] = [
         (BadRequestError("Empty filename"), 400, "BAD_REQUEST"),
         (DocumentNotFoundError("Missing doc"), 404, "DOCUMENT_NOT_FOUND"),
@@ -325,18 +439,9 @@ def test_exceptions_and_pydantic_v2_schemas() -> None:
         assert validated.error == ErrorDetail(code=expected_code, message=exc.message)
 
     now = datetime.now(UTC)
-    health = HealthResponse(
-        status="ok",
-        version="0.1.0",
-        database="ok",
-        vector_store="ok",
-        embedding_model_loaded=True,
-        timestamp=now,
-    )
-    assert health.model_dump()["status"] == "ok"
-
+    doc_uuid = uuid.uuid4()
     orm_doc = Document(
-        id=str(uuid.uuid4()),
+        id=str(doc_uuid),
         filename="report.pdf",
         content_type="application/pdf",
         file_size_bytes=2048,
@@ -350,8 +455,24 @@ def test_exceptions_and_pydantic_v2_schemas() -> None:
         updated_at=now,
     )
     doc_schema = DocumentResponse.model_validate(orm_doc)
+    assert doc_schema.id == doc_uuid
     assert doc_schema.status == DocumentStatus.READY
     assert doc_schema.chunk_count == 5
+
+    # error_message, page_count, and chunk_count must be required keys in DocumentResponse.
+    with pytest.raises(PydanticValidationError):
+        DocumentResponse.model_validate(
+            {
+                "id": str(doc_uuid),
+                "filename": "report.pdf",
+                "content_type": "application/pdf",
+                "file_size_bytes": 2048,
+                "sha256_hash": "d" * 64,
+                "status": "pending",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
 
     doc_list = DocumentListResponse(items=[doc_schema], total=1, limit=20, offset=0)
     assert len(doc_list.items) == 1
@@ -367,6 +488,7 @@ def test_runtime_checkable_service_protocols() -> None:
             document_id: str,
         ) -> SavedFileResult:
             return SavedFileResult(
+                filename="sample.pdf",
                 storage_path=f"data/uploads/{document_id}.pdf",
                 sha256_hash="e" * 64,
                 file_size_bytes=10,
@@ -411,6 +533,9 @@ def test_runtime_checkable_service_protocols() -> None:
             return True
 
     class FakeVectorStore:
+        def __init__(self) -> None:
+            self.closed = False
+
         def upsert_chunks(
             self,
             document_id: str,
@@ -427,13 +552,19 @@ def test_runtime_checkable_service_protocols() -> None:
             return 0
 
         def health_check(self) -> bool:
-            return True
+            return not self.closed
 
+        def close(self) -> None:
+            self.closed = True
+
+    vector_store = FakeVectorStore()
     assert isinstance(FakeStorage(), StorageService)
     assert isinstance(FakeExtractor(), PDFExtractor)
     assert isinstance(FakeChunker(), TokenChunker)
     assert isinstance(FakeEmbeddings(), EmbeddingService)
-    assert isinstance(FakeVectorStore(), VectorStore)
+    assert isinstance(vector_store, VectorStore)
+    vector_store.close()
+    assert vector_store.closed is True
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +597,23 @@ def test_openapi_contract_export_and_committed_sync(tmp_path: Path) -> None:
     }
     assert expected_schemas.issubset(component_schemas.keys())
 
+    # DocumentResponse must require all non-optional response keys and use format: uuid for id.
+    doc_schema = component_schemas["DocumentResponse"]
+    assert doc_schema["properties"]["id"]["format"] == "uuid"
+    assert set(doc_schema["required"]) == {
+        "id",
+        "filename",
+        "content_type",
+        "file_size_bytes",
+        "sha256_hash",
+        "status",
+        "error_message",
+        "page_count",
+        "chunk_count",
+        "created_at",
+        "updated_at",
+    }
+
     expected_endpoints: dict[tuple[str, str], tuple[str, set[str]]] = {
         ("/api/v1/health", "get"): ("200", {"503"}),
         ("/api/v1/documents", "post"): ("202", {"400", "413", "415", "422"}),
@@ -480,6 +628,16 @@ def test_openapi_contract_export_and_committed_sync(tmp_path: Path) -> None:
 
     for (path, method), (ok_code, error_codes) in expected_endpoints.items():
         operation = paths[path][method]
+        if "{document_id}" in path:
+            path_params = [
+                param
+                for param in operation.get("parameters", [])
+                if param.get("in") == "path" and param.get("name") == "document_id"
+            ]
+            assert len(path_params) == 1
+            assert path_params[0]["schema"]["type"] == "string"
+            assert path_params[0]["schema"]["format"] == "uuid"
+
         responses = operation["responses"]
         assert ok_code in responses
         for err_code in error_codes:
@@ -524,9 +682,20 @@ def test_gate_pymupdf_extract_close_and_immediate_delete(tmp_path: Path) -> None
 
 
 def test_gate_torch_tokenizer_and_sentence_transformer() -> None:
-    """Gate 5: Torch tensor ops, AutoTokenizer, and all-MiniLM-L6-v2 produce (384,) embeddings."""
+    """Gate 5: CPU-only PyTorch, special-token budget (200/254<=256), and (384,) embeddings."""
     from sentence_transformers import SentenceTransformer
     from transformers import AutoTokenizer
+
+    # Assert CPU-only PyTorch and confirm zero nvidia-* CUDA packages are installed.
+    assert not torch.cuda.is_available()
+    assert "+cpu" in torch.__version__
+    installed_names = {
+        dist.metadata["Name"].lower()
+        for dist in importlib_metadata.distributions()
+        if dist.metadata.get("Name")
+    }
+    nvidia_pkgs = sorted(name for name in installed_names if name.startswith("nvidia-"))
+    assert not nvidia_pkgs, f"Unexpected CUDA/NVIDIA packages installed: {nvidia_pkgs}"
 
     tensor = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
     product = tensor @ tensor.T
@@ -536,6 +705,8 @@ def test_gate_torch_tokenizer_and_sentence_transformer() -> None:
 
     model_name = "sentence-transformers/all-MiniLM-L6-v2"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    assert tokenizer.num_special_tokens_to_add(pair=False) == 2
+
     encoded = tokenizer(
         "DocSense verifies token budgeting.",
         return_offsets_mapping=True,
@@ -546,6 +717,12 @@ def test_gate_torch_tokenizer_and_sentence_transformer() -> None:
 
     model = SentenceTransformer(model_name, device="cpu")
     assert model.max_seq_length == 256
+
+    assert len(tokenizer.encode("word", add_special_tokens=False)) == 1
+    ids_200 = tokenizer.encode(" ".join(["word"] * 200), add_special_tokens=True)
+    ids_254 = tokenizer.encode(" ".join(["word"] * 254), add_special_tokens=True)
+    assert len(ids_200) == 202 <= model.max_seq_length
+    assert len(ids_254) == 256 <= model.max_seq_length
 
     single_vec = model.encode("DocSense embedding compatibility test", normalize_embeddings=True)
     assert single_vec.shape == (384,)

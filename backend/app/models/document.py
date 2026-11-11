@@ -6,7 +6,6 @@ from enum import StrEnum
 
 from sqlalchemy import (
     CheckConstraint,
-    DateTime,
     ForeignKey,
     Integer,
     String,
@@ -16,6 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.db.types import UTCDateTime
 
 
 class DocumentStatus(StrEnum):
@@ -66,12 +66,12 @@ class Document(Base):
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UTCDateTime,
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UTCDateTime,
         nullable=False,
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
@@ -110,14 +110,15 @@ class DocumentChunk(Base):
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     page_number: Mapped[int] = mapped_column(Integer, nullable=False)
     page_end: Mapped[int] = mapped_column(Integer, nullable=False)
-    page_numbers_csv: Mapped[str] = mapped_column(String(255), nullable=False)
+    page_numbers_csv: Mapped[str] = mapped_column(Text, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     char_start: Mapped[int] = mapped_column(Integer, nullable=False)
     char_end: Mapped[int] = mapped_column(Integer, nullable=False)
     content_preview: Mapped[str] = mapped_column(Text, nullable=False)
+    # Deterministic ChromaDB vector ID in the format "{document_id}:{chunk_index}".
     chroma_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UTCDateTime,
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
