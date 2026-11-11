@@ -20,6 +20,7 @@ from tests.integration.conftest import (
     poll_until_terminal,
 )
 
+import app.services.chunker as chunker_module
 from app.core.exceptions import EmbeddingError, ExtractionError, VectorStoreError
 from app.main import create_app
 from app.models.document import Document, DocumentChunk, DocumentStatus
@@ -704,3 +705,102 @@ def test_method_not_allowed_405_and_cors_headers(tmp_path: Path) -> None:
         )
         assert disallowed_preflight.status_code == 400
         assert "access-control-allow-origin" not in disallowed_preflight.headers
+
+
+def test_degraded_startup_when_tokenizer_init_fails_and_upload_fails_cleanly(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Failed tokenizer init boots degraded (200) and transitions uploads cleanly to failed."""
+    settings = make_isolated_settings(tmp_path, EMBEDDING_MODEL="invalid/offline-tokenizer-model")
+
+    def failing_from_pretrained(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("Simulated offline/invalid tokenizer repository")
+
+    monkeypatch.setattr(chunker_module.AutoTokenizer, "from_pretrained", failing_from_pretrained)
+
+    app = create_app(settings, eager_load_embeddings=True)
+
+    with TestClient(app) as client:
+        health_resp = client.get("/api/v1/health")
+        assert health_resp.status_code == 200
+        health = HealthResponse.model_validate(health_resp.json())
+        assert health.status == "degraded"
+        assert health.database == "ok"
+        assert health.vector_store == "ok"
+        assert health.embedding_model_loaded is False
+        assert app.state.chunker.is_loaded() is False
+        assert app.state.embedding_service.is_loaded() is False
+
+        upload_resp = client.post(
+            "/api/v1/documents",
+            files={
+                "file": (
+                    "degraded_upload.pdf",
+                    make_text_pdf_bytes(["Valid PDF uploaded while tokenizer is unavailable."]),
+                    "application/pdf",
+                )
+            },
+        )
+        assert upload_resp.status_code == 202
+        uploaded = DocumentResponse.model_validate(upload_resp.json())
+        doc_id = str(uploaded.id)
+        assert uploaded.status == DocumentStatus.PENDING
+
+        failed_doc = poll_until_terminal(client, doc_id)
+        assert failed_doc["status"] == DocumentStatus.FAILED.value
+        assert failed_doc["chunk_count"] == 0
+        assert "EMBEDDING_ERROR" in (failed_doc["error_message"] or "")
+        assert app.state.vector_store.count_by_document(doc_id) == 0
+        with app.state.session_factory() as session:
+            assert (
+                session.execute(
+                    select(DocumentChunk).where(DocumentChunk.document_id == doc_id)
+                )
+                .scalars()
+                .all()
+                == []
+            )
+
+        still_healthy = client.get("/api/v1/health")
+        assert still_healthy.status_code == 200
+        assert HealthResponse.model_validate(still_healthy.json()).status == "degraded"
+
+
+def test_normal_startup_eager_loads_chunker_and_embeddings_to_ready(tmp_path: Path) -> None:
+    """Normal startup with eager_load_embeddings=True loads both components and ingests to ready."""
+    settings = make_isolated_settings(tmp_path)
+    app = create_app(
+        settings,
+        eager_load_embeddings=True,
+        embedding_service=DeterministicEmbeddingService(),
+    )
+
+    with TestClient(app) as client:
+        health_resp = client.get("/api/v1/health")
+        assert health_resp.status_code == 200
+        health = HealthResponse.model_validate(health_resp.json())
+        assert health.status == "ok"
+        assert health.database == "ok"
+        assert health.vector_store == "ok"
+        assert health.embedding_model_loaded is True
+        assert app.state.chunker.is_loaded() is True
+        assert app.state.embedding_service.is_loaded() is True
+
+        upload_resp = client.post(
+            "/api/v1/documents",
+            files={
+                "file": (
+                    "normal_eager.pdf",
+                    make_text_pdf_bytes(["Normal startup eager load verification text. " * 10]),
+                    "application/pdf",
+                )
+            },
+        )
+        assert upload_resp.status_code == 202
+        doc_id = upload_resp.json()["id"]
+
+        ready_doc = poll_until_terminal(client, doc_id)
+        assert ready_doc["status"] == DocumentStatus.READY.value
+        assert ready_doc["chunk_count"] >= 1
+        assert app.state.vector_store.count_by_document(doc_id) == ready_doc["chunk_count"]

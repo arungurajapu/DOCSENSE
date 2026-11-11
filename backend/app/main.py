@@ -43,6 +43,29 @@ from app.services.storage import StorageService
 logger = logging.getLogger(__name__)
 
 
+async def _eager_load_component(component_name: str, component: Any) -> bool:
+    """Pre-warm a startup component off the event loop, degrading cleanly on failure."""
+    load_fn = getattr(component, "load", None)
+    if not callable(load_fn):
+        return True
+    try:
+        await asyncio.to_thread(load_fn)
+        return True
+    except EmbeddingError as exc:
+        logger.warning(
+            "Eager loading of %s failed; starting degraded: %s",
+            component_name,
+            exc,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Unexpected error loading %s; starting degraded: %s",
+            component_name,
+            exc,
+        )
+    return False
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -72,7 +95,7 @@ def create_app(
             active_chunker = (
                 chunker
                 if chunker is not None
-                else await asyncio.to_thread(TokenChunker, cfg)
+                else TokenChunker(cfg, eager_load=False)
             )
             active_embeddings = (
                 embedding_service
@@ -105,20 +128,12 @@ def create_app(
             application.state.ingestion_service = ingestion
 
             if eager_load_embeddings:
-                load_fn = getattr(active_embeddings, "load", None)
-                if callable(load_fn):
-                    try:
-                        await asyncio.to_thread(load_fn)
-                    except EmbeddingError as exc:
-                        logger.warning(
-                            "Eager loading of embedding model failed; starting degraded: %s",
-                            exc,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "Unexpected error loading embedding model; starting degraded: %s",
-                            exc,
-                        )
+                for component_name, component in (
+                    ("embedding tokenizer", active_chunker),
+                    ("embedding model", active_embeddings),
+                ):
+                    if not await _eager_load_component(component_name, component):
+                        break
 
             await ingestion.recover_incomplete_documents()
             yield

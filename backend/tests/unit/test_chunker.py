@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +14,7 @@ from transformers import AutoTokenizer
 
 import app.services.chunker as chunker_module
 from app.core.config import Settings
+from app.core.exceptions import EmbeddingError
 from app.services.chunker import TokenChunker
 from app.services.interfaces import ExtractedPage
 from app.services.interfaces import TokenChunker as TokenChunkerProtocol
@@ -271,3 +275,146 @@ def test_token_chunker_empty_or_whitespace_pages_returns_empty(test_settings: Se
     chunker = TokenChunker(test_settings)
     assert chunker.chunk([], "empty-doc") == []
     assert chunker.chunk([ExtractedPage(page_number=1, text="  \n\t ")], "ws-doc") == []
+
+
+def test_token_chunker_lazy_load_on_load_and_chunk(
+    test_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """eager_load=False defers tokenizer init until load(), chunk(), or token-count helpers."""
+    real_tokenizer = AutoTokenizer.from_pretrained(test_settings.EMBEDDING_MODEL)
+    load_calls: list[dict[str, Any]] = []
+
+    def tracking_from_pretrained(model_name: str, **kwargs: Any) -> Any:
+        load_calls.append({"model_name": model_name, **kwargs})
+        return real_tokenizer
+
+    monkeypatch.setattr(chunker_module.AutoTokenizer, "from_pretrained", tracking_from_pretrained)
+
+    # 1. Init with eager_load=False does not load; empty/whitespace pages stay lazy.
+    lazy_load_chunker = TokenChunker(test_settings, eager_load=False)
+    assert lazy_load_chunker.is_loaded() is False
+    assert load_calls == []
+    assert lazy_load_chunker.chunk([], "empty-doc") == []
+    assert lazy_load_chunker.chunk([ExtractedPage(page_number=1, text="   \n ")], "ws-doc") == []
+    assert lazy_load_chunker.is_loaded() is False
+    assert load_calls == []
+
+    # Calling load() initializes once; repeated load() is a no-op.
+    lazy_load_chunker.load()
+    assert lazy_load_chunker.is_loaded() is True
+    assert len(load_calls) == 1
+    lazy_load_chunker.load()
+    assert len(load_calls) == 1
+
+    # 2. First chunk() call initializes tokenizer cleanly when not preloaded.
+    lazy_run_chunker = TokenChunker(test_settings, eager_load=False)
+    assert lazy_run_chunker.is_loaded() is False
+    chunks = lazy_run_chunker.chunk(
+        [ExtractedPage(page_number=1, text="Lazy initialization on first chunk call.")],
+        "lazy-doc",
+    )
+    assert len(chunks) == 1
+    assert lazy_run_chunker.is_loaded() is True
+    assert len(load_calls) == 2
+
+    # 3. Direct helper calls route through _get_or_load_tokenizer() safely.
+    helper_chunker = TokenChunker(test_settings, eager_load=False)
+    assert helper_chunker.is_loaded() is False
+    assert helper_chunker._encoded_length_with_special_tokens("hello") > 2
+    assert helper_chunker.is_loaded() is True
+    assert len(load_calls) == 3
+
+    count_chunker = TokenChunker(test_settings, eager_load=False)
+    assert count_chunker._content_token_count("hello world") == 2
+    assert count_chunker.is_loaded() is True
+    assert len(load_calls) == 4
+
+
+def test_token_chunker_concurrent_lazy_load_is_thread_safe(
+    test_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent chunk() calls on eager_load=False initialize the tokenizer at most once."""
+    real_tokenizer = AutoTokenizer.from_pretrained(test_settings.EMBEDDING_MODEL)
+    load_count = 0
+    count_lock = threading.Lock()
+    barrier = threading.Barrier(8)
+
+    def slow_from_pretrained(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal load_count
+        time.sleep(0.03)
+        with count_lock:
+            load_count += 1
+        return real_tokenizer
+
+    monkeypatch.setattr(chunker_module.AutoTokenizer, "from_pretrained", slow_from_pretrained)
+
+    chunker = TokenChunker(test_settings, eager_load=False)
+    assert chunker.is_loaded() is False
+
+    def worker(idx: int) -> tuple[int, bool]:
+        barrier.wait(timeout=5.0)
+        chunks = chunker.chunk(
+            [ExtractedPage(page_number=1, text=f"concurrent chunk worker {idx}")],
+            f"doc-{idx}",
+        )
+        return len(chunks), chunker.is_loaded()
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(worker, range(8)))
+
+    assert load_count == 1
+    assert chunker.is_loaded() is True
+    for chunk_count, loaded_flag in results:
+        assert chunk_count == 1
+        assert loaded_flag is True
+
+
+def test_token_chunker_invalid_or_offline_model_raises_embedding_error(
+    test_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty model names and offline/invalid tokenizer failures raise EmbeddingError."""
+    # 1. Empty / whitespace model_name raises EmbeddingError on eager init and deferred use.
+    empty_cfg = test_settings.model_copy(update={"EMBEDDING_MODEL": "   "})
+    with pytest.raises(EmbeddingError, match="must not be empty"):
+        TokenChunker(empty_cfg)
+
+    lazy_empty = TokenChunker(empty_cfg, eager_load=False)
+    assert lazy_empty.is_loaded() is False
+    with pytest.raises(EmbeddingError, match="must not be empty"):
+        lazy_empty.load()
+    with pytest.raises(EmbeddingError, match="must not be empty"):
+        lazy_empty.chunk([ExtractedPage(page_number=1, text="hello")], "empty-model-doc")
+    assert lazy_empty.is_loaded() is False
+
+    # 2. Failed primary + local_files_only=True fallback wraps OSError in EmbeddingError.
+    def always_fail_from_pretrained(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("Simulated offline missing tokenizer")
+
+    monkeypatch.setattr(
+        chunker_module.AutoTokenizer,
+        "from_pretrained",
+        always_fail_from_pretrained,
+    )
+
+    with pytest.raises(EmbeddingError, match="Failed to load tokenizer"):
+        TokenChunker(test_settings)
+
+    lazy_offline = TokenChunker(test_settings, eager_load=False)
+    assert lazy_offline.is_loaded() is False
+    with pytest.raises(EmbeddingError, match="Failed to load tokenizer"):
+        lazy_offline.load()
+    assert lazy_offline.is_loaded() is False
+    with pytest.raises(EmbeddingError, match="Failed to load tokenizer"):
+        lazy_offline.chunk([ExtractedPage(page_number=1, text="hello")], "offline-doc")
+    assert lazy_offline.is_loaded() is False
+
+    # 3. Fallback TypeError (when loader rejects local_files_only) also wraps in EmbeddingError.
+    def strict_sig_fail(_model_name: str) -> Any:
+        raise OSError("Primary failure without local_files_only support")
+
+    monkeypatch.setattr(chunker_module.AutoTokenizer, "from_pretrained", strict_sig_fail)
+    with pytest.raises(EmbeddingError, match="Failed to load tokenizer"):
+        TokenChunker(test_settings)
