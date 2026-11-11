@@ -1,0 +1,604 @@
+{
+  "components": {
+    "schemas": {
+      "Body_upload_document": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "description": "PDF file to upload and ingest",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_document",
+        "type": "object"
+      },
+      "DocumentListResponse": {
+        "description": "Paginated list of documents.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DocumentResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "DocumentListResponse",
+        "type": "object"
+      },
+      "DocumentResponse": {
+        "description": "Serialized document metadata and ingestion status.",
+        "properties": {
+          "chunk_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Chunk Count",
+            "type": "integer"
+          },
+          "content_type": {
+            "title": "Content Type",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "file_size_bytes": {
+            "minimum": 0.0,
+            "title": "File Size Bytes",
+            "type": "integer"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "page_count": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Count"
+          },
+          "sha256_hash": {
+            "title": "Sha256 Hash",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DocumentStatus"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "filename",
+          "content_type",
+          "file_size_bytes",
+          "sha256_hash",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "DocumentResponse",
+        "type": "object"
+      },
+      "DocumentStatus": {
+        "description": "Lifecycle states for an ingested document.",
+        "enum": [
+          "pending",
+          "processing",
+          "ready",
+          "failed",
+          "deleting"
+        ],
+        "title": "DocumentStatus",
+        "type": "string"
+      },
+      "ErrorDetail": {
+        "description": "Machine-readable error code and human-readable message.",
+        "properties": {
+          "code": {
+            "examples": [
+              "DOCUMENT_NOT_FOUND"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "examples": [
+              "Document not found."
+            ],
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorDetail",
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "description": "Unified error envelope returned for all 4xx/5xx responses including 422.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "description": "Service readiness and dependency status summary.",
+        "properties": {
+          "database": {
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Database",
+            "type": "string"
+          },
+          "embedding_model_loaded": {
+            "title": "Embedding Model Loaded",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "degraded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "vector_store": {
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Vector Store",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "version",
+          "database",
+          "vector_store",
+          "embedding_model_loaded",
+          "timestamp"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "DocSense Document Ingestion API contract.",
+    "title": "DocSense API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/documents": {
+      "get": {
+        "operationId": "list_documents",
+        "parameters": [
+          {
+            "description": "Filter by lifecycle status",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/DocumentStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by lifecycle status",
+              "title": "Status"
+            }
+          },
+          {
+            "description": "Maximum items to return",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "description": "Maximum items to return",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Pagination offset",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Pagination offset",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation or unprocessable entity error"
+          }
+        },
+        "summary": "List documents with optional status filtering and pagination",
+        "tags": [
+          "documents"
+        ]
+      },
+      "post": {
+        "operationId": "upload_document",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_document"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Malformed upload request"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Uploaded file exceeds max size limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unsupported or corrupt PDF media"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation or unprocessable entity error"
+          }
+        },
+        "summary": "Upload a PDF document for ingestion",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/v1/documents/{document_id}": {
+      "delete": {
+        "operationId": "delete_document",
+        "parameters": [
+          {
+            "description": "Document ID",
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "description": "Document ID",
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Document not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Document state conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation or unprocessable entity error"
+          }
+        },
+        "summary": "Delete a document and its indexed chunks",
+        "tags": [
+          "documents"
+        ]
+      },
+      "get": {
+        "operationId": "get_document",
+        "parameters": [
+          {
+            "description": "Document ID",
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "description": "Document ID",
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Document not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation or unprocessable entity error"
+          }
+        },
+        "summary": "Get a document by ID",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/v1/documents/{document_id}/reprocess": {
+      "post": {
+        "operationId": "reprocess_document",
+        "parameters": [
+          {
+            "description": "Document ID",
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "description": "Document ID",
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Document not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Document state conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation or unprocessable entity error"
+          }
+        },
+        "summary": "Reprocess a failed document",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "operationId": "health_check",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Required dependency unavailable"
+          }
+        },
+        "summary": "Service health check",
+        "tags": [
+          "health"
+        ]
+      }
+    }
+  }
+}

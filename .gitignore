@@ -1,11 +1,21 @@
 # Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+.eggs/
 .venv/
 venv/
 .env
 .env.*
 !.env.example
+.ruff_cache/
+
+# Local Runtime Data & SQLite Databases
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
 
 # Node
 node_modules/
