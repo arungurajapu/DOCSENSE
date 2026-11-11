@@ -30,6 +30,7 @@ export function UploadPanel({
   const dragDepthRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isMountedRef = useRef(true);
+  const onUploadSuccessRef = useRef(onUploadSuccess);
 
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -38,6 +39,10 @@ export function UploadPanel({
   );
   const [error, setError] = useState<UploadErrorState | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    onUploadSuccessRef.current = onUploadSuccess;
+  }, [onUploadSuccess]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -78,7 +83,7 @@ export function UploadPanel({
       setSuccessMessage(
         `"${createdDocument.filename}" queued for ingestion.`,
       );
-      onUploadSuccess(createdDocument);
+      onUploadSuccessRef.current(createdDocument);
     } catch (caught) {
       if (isAbortError(caught) || !isMountedRef.current) {
         return;

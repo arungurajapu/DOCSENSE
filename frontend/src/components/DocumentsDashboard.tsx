@@ -224,17 +224,19 @@ export function DocumentsDashboard() {
       return;
     }
 
-    setDocuments((prev) => {
-      const exists = prev.some((item) => item.id === createdDocument.id);
-      const nextItems = [
+    const alreadyInCurrentPage = documents.some(
+      (item) => item.id === createdDocument.id,
+    );
+
+    setDocuments((prev) =>
+      [
         createdDocument,
         ...prev.filter((item) => item.id !== createdDocument.id),
-      ].slice(0, DEFAULT_PAGE_SIZE);
-      if (!exists) {
-        setTotal((prevTotal) => prevTotal + 1);
-      }
-      return nextItems;
-    });
+      ].slice(0, DEFAULT_PAGE_SIZE),
+    );
+    if (!alreadyInCurrentPage) {
+      setTotal((prevTotal) => prevTotal + 1);
+    }
   }
 
   async function handleReprocess(doc: DocumentResponse) {

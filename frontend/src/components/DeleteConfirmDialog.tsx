@@ -23,16 +23,30 @@ export function DeleteConfirmDialog({
   onConfirm,
 }: DeleteConfirmDialogProps) {
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const onCancelRef = useRef(onCancel);
+
+  const documentId = document?.id ?? null;
+  const isOpen = documentId !== null;
 
   useEffect(() => {
-    if (!document) {
+    onCancelRef.current = onCancel;
+  }, [onCancel]);
+
+  useEffect(() => {
+    if (documentId === null) {
       return;
     }
     cancelButtonRef.current?.focus();
+  }, [documentId]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !isDeleting) {
-        onCancel();
+        onCancelRef.current();
       }
     };
 
@@ -40,7 +54,7 @@ export function DeleteConfirmDialog({
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [document, isDeleting, onCancel]);
+  }, [isOpen, isDeleting]);
 
   if (!document) {
     return null;

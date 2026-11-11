@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import {
   act,
   fireEvent,
@@ -561,5 +562,128 @@ describe("DocumentsDashboard", () => {
       await screen.findByRole("article", { name: "page2.pdf" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Showing 21–21 of 21")).toBeInTheDocument();
+  });
+
+  it("keeps focus on Confirm delete across 2s polling updates while delete dialog is open", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+
+    const activeDoc = makeDoc({
+      id: "550e8400-e29b-41d4-a716-446655440060",
+      filename: "active.pdf",
+      status: "pending",
+      page_count: null,
+      chunk_count: 0,
+    });
+    const targetDoc = makeDoc({
+      id: "550e8400-e29b-41d4-a716-446655440061",
+      filename: "target.pdf",
+      status: "ready",
+    });
+
+    let getCalls = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/v1/health")) {
+        return jsonResponse(makeHealth());
+      }
+      if (url.includes("/api/v1/documents")) {
+        getCalls += 1;
+        const polledActive =
+          getCalls === 1
+            ? activeDoc
+            : { ...activeDoc, status: "processing" as const };
+        return jsonResponse(makeListResponse([polledActive, targetDoc]));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<DocumentsDashboard />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /delete target\.pdf/i }),
+    );
+    const dialog = screen.getByRole("dialog");
+    const cancelButton = within(dialog).getByRole("button", {
+      name: /^cancel$/i,
+    });
+    const confirmButton = within(dialog).getByRole("button", {
+      name: /confirm delete/i,
+    });
+
+    expect(cancelButton).toHaveFocus();
+    confirmButton.focus();
+    expect(confirmButton).toHaveFocus();
+
+    // Advance across multiple 2s poll cycles; polling re-renders must not steal focus.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+      await Promise.resolve();
+    });
+    expect(getCalls).toBe(2);
+    expect(confirmButton).toHaveFocus();
+    expect(cancelButton).not.toHaveFocus();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+      await Promise.resolve();
+    });
+    expect(getCalls).toBe(3);
+    expect(confirmButton).toHaveFocus();
+  });
+
+  it("increments total by exactly 1 on upload when rendered under React StrictMode", async () => {
+    const existingDoc = makeDoc({
+      id: "550e8400-e29b-41d4-a716-446655440070",
+      filename: "existing.pdf",
+      status: "ready",
+    });
+    const uploadedDoc = makeDoc({
+      id: "550e8400-e29b-41d4-a716-446655440071",
+      filename: "new-strict.pdf",
+      status: "pending",
+      page_count: null,
+      chunk_count: 0,
+    });
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/v1/health")) {
+        return jsonResponse(makeHealth());
+      }
+      if (url.includes("/api/v1/documents") && init?.method === "POST") {
+        return jsonResponse(uploadedDoc, 202);
+      }
+      if (url.includes("/api/v1/documents")) {
+        return jsonResponse(makeListResponse([existingDoc], 1));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(
+      <StrictMode>
+        <DocumentsDashboard />
+      </StrictMode>,
+    );
+
+    expect(
+      await screen.findByRole("article", { name: "existing.pdf" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 document")).toBeInTheDocument();
+
+    const input = screen.getByLabelText(/choose pdf file/i);
+    const pdfFile = new File(["%PDF-1.4"], "new-strict.pdf", {
+      type: "application/pdf",
+    });
+    fireEvent.change(input, { target: { files: [pdfFile] } });
+
+    expect(
+      await screen.findByRole("article", { name: "new-strict.pdf" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("2 documents")).toBeInTheDocument();
+    expect(screen.queryByText("3 documents")).not.toBeInTheDocument();
   });
 });
