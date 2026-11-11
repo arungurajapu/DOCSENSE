@@ -1,12 +1,17 @@
 """Model-aligned overlapping token chunker with cross-page provenance."""
 
+import logging
+import threading
 from collections.abc import Sequence
 from typing import Any
 
 from transformers import AutoTokenizer
 
 from app.core.config import Settings, get_settings
+from app.core.exceptions import EmbeddingError
 from app.services.interfaces import ExtractedPage, TextChunk
+
+logger = logging.getLogger(__name__)
 
 CONTENT_PREVIEW_MAX_CHARS = 200
 PAGE_SEPARATOR = "\n\n"
@@ -14,10 +19,35 @@ PAGE_SEPARATOR = "\n\n"
 
 def _load_tokenizer(model_name: str) -> Any:
     """Load the HuggingFace tokenizer with offline local-cache fallback."""
+    if model_name is None or not str(model_name).strip():
+        raise EmbeddingError("EMBEDDING_MODEL must not be empty.")
+    normalized_name = str(model_name).strip()
+
     try:
-        return AutoTokenizer.from_pretrained(model_name)
-    except Exception:
-        return AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+        tokenizer = AutoTokenizer.from_pretrained(normalized_name)
+    except Exception as exc:
+        logger.warning(
+            "Primary load for tokenizer '%s' failed (%s); retrying with local_files_only=True.",
+            normalized_name,
+            exc,
+        )
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(normalized_name, local_files_only=True)
+        except TypeError:
+            raise EmbeddingError(
+                f"Failed to load tokenizer for embedding model '{normalized_name}': {exc}"
+            ) from exc
+        except Exception as fallback_exc:
+            raise EmbeddingError(
+                f"Failed to load tokenizer for embedding model '{normalized_name}': {fallback_exc}"
+            ) from fallback_exc
+
+    if tokenizer is None:
+        raise EmbeddingError(
+            f"Failed to load tokenizer for embedding model '{normalized_name}': "
+            "from_pretrained returned None."
+        )
+    return tokenizer
 
 
 def _build_content_preview(text: str) -> str:
@@ -62,19 +92,41 @@ class TokenChunker:
         settings: Settings | None = None,
         *,
         tokenizer: Any | None = None,
+        eager_load: bool = True,
     ) -> None:
         self._settings = settings or get_settings()
-        self._tokenizer = (
-            tokenizer
-            if tokenizer is not None
-            else _load_tokenizer(self._settings.EMBEDDING_MODEL)
-        )
+        self._tokenizer = tokenizer
+        self._load_lock = threading.Lock()
+
+        if self._tokenizer is None and eager_load:
+            self.load()
+
+    def is_loaded(self) -> bool:
+        """Return whether the embedding tokenizer is currently loaded."""
+        return self._tokenizer is not None
+
+    def load(self) -> None:
+        """Eagerly load the embedding tokenizer in a thread-safe manner."""
+        self._get_or_load_tokenizer()
+
+    def _get_or_load_tokenizer(self) -> Any:
+        """Return the loaded tokenizer, initializing it at most once across threads."""
+        tokenizer = self._tokenizer
+        if tokenizer is not None:
+            return tokenizer
+
+        with self._load_lock:
+            if self._tokenizer is None:
+                self._tokenizer = _load_tokenizer(self._settings.EMBEDDING_MODEL)
+            return self._tokenizer
 
     def _encoded_length_with_special_tokens(self, text: str) -> int:
-        return len(self._tokenizer.encode(text, add_special_tokens=True))
+        tokenizer = self._get_or_load_tokenizer()
+        return len(tokenizer.encode(text, add_special_tokens=True))
 
     def _content_token_count(self, text: str) -> int:
-        return len(self._tokenizer.encode(text, add_special_tokens=False))
+        tokenizer = self._get_or_load_tokenizer()
+        return len(tokenizer.encode(text, add_special_tokens=False))
 
     def _fit_token_window_end(
         self,
@@ -172,7 +224,8 @@ class TokenChunker:
             return []
 
         combined_text = PAGE_SEPARATOR.join(parts)
-        encoded = self._tokenizer(
+        tokenizer = self._get_or_load_tokenizer()
+        encoded = tokenizer(
             combined_text,
             return_offsets_mapping=True,
             truncation=False,
