@@ -109,22 +109,28 @@ class IngestionService:
         done = asyncio.Event()
         self._inflight_events.add(done)
 
+        def _complete_event() -> None:
+            done.set()
+            self._inflight_events.discard(done)
+
         def _runner() -> _R:
             try:
                 return func(*args, **kwargs)
             finally:
                 try:
-                    loop.call_soon_threadsafe(done.set)
+                    loop.call_soon_threadsafe(_complete_event)
                 except RuntimeError:
                     pass
 
-        inner_task = asyncio.create_task(asyncio.to_thread(_runner))
-        inner_task.add_done_callback(self._consume_background_exception)
+        coro = asyncio.to_thread(_runner)
         try:
-            return await asyncio.shield(inner_task)
-        finally:
-            if done.is_set():
-                self._inflight_events.discard(done)
+            inner_task = asyncio.create_task(coro)
+        except BaseException:
+            coro.close()
+            self._inflight_events.discard(done)
+            raise
+        inner_task.add_done_callback(self._consume_background_exception)
+        return await asyncio.shield(inner_task)
 
     async def _track_async(self, awaitable: Awaitable[_R]) -> _R:
         """Track an external async operation (e.g. ``embed_texts_async``) across shutdown."""
@@ -136,14 +142,17 @@ class IngestionService:
                 return await awaitable
             finally:
                 done.set()
-
-        inner_task = asyncio.create_task(_runner())
-        inner_task.add_done_callback(self._consume_background_exception)
-        try:
-            return await asyncio.shield(inner_task)
-        finally:
-            if done.is_set():
                 self._inflight_events.discard(done)
+
+        coro = _runner()
+        try:
+            inner_task = asyncio.create_task(coro)
+        except BaseException:
+            coro.close()
+            self._inflight_events.discard(done)
+            raise
+        inner_task.add_done_callback(self._consume_background_exception)
+        return await asyncio.shield(inner_task)
 
     async def run_in_thread(
         self,
@@ -428,15 +437,18 @@ class IngestionService:
                     f"Document '{document_id}' cannot be reprocessed in status '{doc.status}'."
                 )
 
+            # Deadlock-free: mark_failed transitions processing -> failed inside doc_lock near
+            # _run_ingestion exit, so once DB status is failed here any active prior.task has
+            # already released doc_lock and is merely winding down.
             prior = self._active_runs.get(document_id)
             if prior is not None and not prior.task.done():
                 await asyncio.gather(prior.task, return_exceptions=True)
 
+            await self._to_thread(self._vector_store.delete_document, document_id)
             updated = await self._to_thread(
                 self._repo.reset_failed_for_reprocess,
                 document_id,
             )
-            await self._to_thread(self._vector_store.delete_document, document_id)
             self.schedule_ingestion(document_id)
             return DocumentResponse.model_validate(updated)
 

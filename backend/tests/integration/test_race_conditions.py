@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 from sqlalchemy import select, update
 from tests.integration.conftest import (
     DeterministicEmbeddingService,
@@ -736,5 +737,110 @@ def test_shutdown_drains_outstanding_embed_texts_async_before_close_and_dispose(
             releaser.join(timeout=5.0)
 
         assert events == ["embed_worker_finished", "vector_store_close", "engine_dispose"]
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_non_shutdown_callers_drain_and_discard_inflight_events(
+    tmp_path: Path,
+) -> None:
+    """Cancelled run_in_thread and _track_async callers finish cleanly and discard events."""
+    settings = make_isolated_settings(tmp_path)
+
+    async def scenario() -> None:
+        app = create_app(
+            settings,
+            eager_load_embeddings=True,
+            embedding_service=DeterministicEmbeddingService(loaded=True),
+        )
+        async with app.router.lifespan_context(app):
+            ingestion = app.state.ingestion_service
+
+            # 1. Cancelled run_in_thread (_to_thread) caller without shutdown.
+            sync_entered = threading.Event()
+            sync_release = threading.Event()
+            sync_completed = threading.Event()
+
+            def slow_sync() -> str:
+                sync_entered.set()
+                try:
+                    assert sync_release.wait(timeout=5.0)
+                    return "done"
+                finally:
+                    sync_completed.set()
+
+            sync_caller = asyncio.create_task(ingestion.run_in_thread(slow_sync))
+            assert await asyncio.to_thread(sync_entered.wait, 5.0)
+            assert len(ingestion._inflight_events) == 1
+
+            sync_caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await sync_caller
+
+            # Worker is still running -> event stays tracked until worker completes.
+            assert not sync_completed.is_set()
+            assert len(ingestion._inflight_events) == 1
+
+            sync_release.set()
+            assert await asyncio.to_thread(sync_completed.wait, 5.0)
+            await asyncio.sleep(0.02)
+            assert len(ingestion._inflight_events) == 0
+
+            # 2. Cancelled _track_async caller without shutdown.
+            async_entered = asyncio.Event()
+            async_release = asyncio.Event()
+            async_completed = asyncio.Event()
+
+            async def slow_async() -> str:
+                async_entered.set()
+                try:
+                    await async_release.wait()
+                    return "done"
+                finally:
+                    async_completed.set()
+
+            async_caller = asyncio.create_task(ingestion._track_async(slow_async()))
+            await asyncio.wait_for(async_entered.wait(), timeout=5.0)
+            assert len(ingestion._inflight_events) == 1
+
+            async_caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await async_caller
+
+            assert not async_completed.is_set()
+            assert len(ingestion._inflight_events) == 1
+
+            async_release.set()
+            await asyncio.wait_for(async_completed.wait(), timeout=5.0)
+            await asyncio.sleep(0)
+            assert len(ingestion._inflight_events) == 0
+
+            # 3. Cancelled non-shutdown caller overlapping with shutdown().
+            overlap_entered = threading.Event()
+            overlap_release = threading.Event()
+            overlap_completed = threading.Event()
+
+            def slow_overlap() -> None:
+                overlap_entered.set()
+                try:
+                    assert overlap_release.wait(timeout=5.0)
+                finally:
+                    overlap_completed.set()
+
+            overlap_caller = asyncio.create_task(ingestion.run_in_thread(slow_overlap))
+            assert await asyncio.to_thread(overlap_entered.wait, 5.0)
+            overlap_caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await overlap_caller
+
+            assert len(ingestion._inflight_events) == 1
+            shutdown_task = asyncio.create_task(ingestion.shutdown())
+            await asyncio.sleep(0.1)
+            assert not shutdown_task.done()
+
+            overlap_release.set()
+            await asyncio.wait_for(shutdown_task, timeout=5.0)
+            assert overlap_completed.is_set()
+            assert len(ingestion._inflight_events) == 0
 
     asyncio.run(scenario())

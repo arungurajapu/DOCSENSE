@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -19,12 +20,13 @@ from tests.integration.conftest import (
     poll_until_terminal,
 )
 
-from app.core.exceptions import ExtractionError
+from app.core.exceptions import EmbeddingError, ExtractionError, VectorStoreError
 from app.main import create_app
 from app.models.document import Document, DocumentChunk, DocumentStatus
+from app.repositories.vector_store import ChromaVectorStore
 from app.schemas import DocumentListResponse, DocumentResponse, ErrorResponse, HealthResponse
 from app.services.extractor import PDFExtractor
-from app.services.interfaces import ExtractedPage
+from app.services.interfaces import ExtractedPage, TextChunk
 
 
 def _assert_error_response(
@@ -443,3 +445,262 @@ def test_health_degraded_and_503_dependency_failures(tmp_path: Path, monkeypatch
         monkeypatch.setattr(app.state.vector_store, "health_check", broken_chroma)
         chroma_err = client.get("/api/v1/health")
         _assert_error_response(chroma_err, 503, "SERVICE_UNAVAILABLE")
+
+
+def test_delete_on_already_deleting_document_returns_409_without_disturbing_state(
+    tmp_path: Path,
+) -> None:
+    """DELETE on a document already in deleting status returns 409 without disturbing cleanup."""
+    settings = make_isolated_settings(tmp_path)
+    app = create_app(
+        settings,
+        eager_load_embeddings=True,
+        embedding_service=DeterministicEmbeddingService(),
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        upload_resp = client.post(
+            "/api/v1/documents",
+            files={
+                "file": (
+                    "deleting_conflict.pdf",
+                    make_text_pdf_bytes(["Deleting conflict test content."]),
+                    "application/pdf",
+                )
+            },
+        )
+        assert upload_resp.status_code == 202
+        doc_id = upload_resp.json()["id"]
+        ready_doc = poll_until_terminal(client, doc_id)
+        assert ready_doc["status"] == "ready"
+        stored_pdf = Path(settings.UPLOAD_DIR) / f"{doc_id}.pdf"
+        assert stored_pdf.is_file()
+        expected_vectors = app.state.vector_store.count_by_document(doc_id)
+        assert expected_vectors >= 1
+
+        # Simulate interrupted deletion: fail vector delete once right after mark_deleting().
+        orig_delete_vectors = app.state.vector_store.delete_document
+        fail_once = True
+
+        def flaky_delete(target_id: str) -> None:
+            nonlocal fail_once
+            if fail_once:
+                fail_once = False
+                raise VectorStoreError("Transient Chroma failure mid-delete")
+            orig_delete_vectors(target_id)
+
+        app.state.vector_store.delete_document = flaky_delete
+
+        first_delete = client.delete(f"/api/v1/documents/{doc_id}")
+        _assert_error_response(first_delete, 500, "VECTOR_STORE_ERROR")
+
+        # Document is now in deleting status; second DELETE returns 409 without disturbing state.
+        conflict_delete = client.delete(f"/api/v1/documents/{doc_id}")
+        _assert_error_response(conflict_delete, 409, "DOCUMENT_CONFLICT")
+
+        current = client.get(f"/api/v1/documents/{doc_id}")
+        assert current.status_code == 200
+        assert current.json()["status"] == DocumentStatus.DELETING.value
+        assert stored_pdf.is_file()
+        assert app.state.vector_store.count_by_document(doc_id) == expected_vectors
+        with app.state.session_factory() as session:
+            chunks = (
+                session.execute(
+                    select(DocumentChunk).where(DocumentChunk.document_id == doc_id)
+                )
+                .scalars()
+                .all()
+            )
+            assert len(chunks) == expected_vectors
+
+
+def test_background_embedding_and_vector_store_failures_and_reprocess_delete_error(
+    tmp_path: Path,
+) -> None:
+    """Verify EmbeddingError, VectorStoreError cleanup, and reprocess delete-failure safety."""
+    settings_a = make_isolated_settings(tmp_path / "embed_case")
+
+    class FlakyAsyncEmbeddings(DeterministicEmbeddingService):
+        def __init__(self) -> None:
+            super().__init__(loaded=True)
+            self.fail_async = True
+
+        async def embed_texts_async(self, texts: Sequence[str]) -> list[list[float]]:
+            if self.fail_async:
+                self.fail_async = False
+                raise EmbeddingError("Simulated async embedding failure")
+            return await super().embed_texts_async(texts)
+
+    app_a = create_app(
+        settings_a,
+        eager_load_embeddings=True,
+        embedding_service=FlakyAsyncEmbeddings(),
+    )
+
+    with TestClient(app_a, raise_server_exceptions=False) as client:
+        upload_resp = client.post(
+            "/api/v1/documents",
+            files={
+                "file": (
+                    "embed_fail.pdf",
+                    make_text_pdf_bytes(["Embedding error recovery test content."]),
+                    "application/pdf",
+                )
+            },
+        )
+        assert upload_resp.status_code == 202
+        doc_id = upload_resp.json()["id"]
+
+        failed_doc = poll_until_terminal(client, doc_id)
+        assert failed_doc["status"] == DocumentStatus.FAILED.value
+        assert failed_doc["chunk_count"] == 0
+        assert "EMBEDDING_ERROR" in (failed_doc["error_message"] or "")
+        assert app_a.state.vector_store.count_by_document(doc_id) == 0
+        with app_a.state.session_factory() as session:
+            assert (
+                session.execute(
+                    select(DocumentChunk).where(DocumentChunk.document_id == doc_id)
+                )
+                .scalars()
+                .all()
+                == []
+            )
+
+        # If vector_store.delete_document fails during reprocess, row must stay failed.
+        orig_delete = app_a.state.vector_store.delete_document
+
+        def fail_delete_once(target_id: str) -> None:
+            app_a.state.vector_store.delete_document = orig_delete
+            raise VectorStoreError("Simulated Chroma delete failure on reprocess")
+
+        app_a.state.vector_store.delete_document = fail_delete_once
+        reprocess_err = client.post(f"/api/v1/documents/{doc_id}/reprocess")
+        _assert_error_response(reprocess_err, 500, "VECTOR_STORE_ERROR")
+
+        still_failed = client.get(f"/api/v1/documents/{doc_id}")
+        assert still_failed.status_code == 200
+        assert still_failed.json()["status"] == DocumentStatus.FAILED.value
+        assert "EMBEDDING_ERROR" in (still_failed.json()["error_message"] or "")
+
+        # Subsequent retry succeeds cleanly and indexes chunks/vectors.
+        retry_resp = client.post(f"/api/v1/documents/{doc_id}/reprocess")
+        assert retry_resp.status_code == 202
+        assert retry_resp.json()["status"] == DocumentStatus.PENDING.value
+
+        ready_doc = poll_until_terminal(client, doc_id)
+        assert ready_doc["status"] == DocumentStatus.READY.value
+        assert ready_doc["chunk_count"] >= 1
+        assert app_a.state.vector_store.count_by_document(doc_id) == ready_doc["chunk_count"]
+
+    # Part B: VectorStoreError mid-upsert purges partial vectors and marks failed cleanly.
+    settings_b = make_isolated_settings(tmp_path / "vector_case")
+    store_b = ChromaVectorStore(settings=settings_b)
+    orig_upsert = store_b.upsert_chunks
+
+    def partial_failing_upsert(
+        document_id: str,
+        filename: str,
+        chunks: Sequence[TextChunk],
+        embeddings: Sequence[Sequence[float]],
+    ) -> None:
+        chunk_list = list(chunks)
+        emb_list = list(embeddings)
+        orig_upsert(document_id, filename, chunk_list[:1], emb_list[:1])
+        raise VectorStoreError("Simulated partial batch upsert failure")
+
+    store_b.upsert_chunks = partial_failing_upsert  # type: ignore[method-assign]
+    app_b = create_app(
+        settings_b,
+        eager_load_embeddings=True,
+        embedding_service=DeterministicEmbeddingService(loaded=True),
+        vector_store=store_b,
+    )
+
+    with TestClient(app_b) as client:
+        resp_b = client.post(
+            "/api/v1/documents",
+            files={
+                "file": (
+                    "vector_fail.pdf",
+                    make_text_pdf_bytes(["Vector store partial upsert failure test."]),
+                    "application/pdf",
+                )
+            },
+        )
+        assert resp_b.status_code == 202
+        doc_b_id = resp_b.json()["id"]
+
+        failed_b = poll_until_terminal(client, doc_b_id)
+        assert failed_b["status"] == DocumentStatus.FAILED.value
+        assert failed_b["chunk_count"] == 0
+        assert "VECTOR_STORE_ERROR" in (failed_b["error_message"] or "")
+        assert store_b.count_by_document(doc_b_id) == 0
+        with app_b.state.session_factory() as session:
+            assert (
+                session.execute(
+                    select(DocumentChunk).where(DocumentChunk.document_id == doc_b_id)
+                )
+                .scalars()
+                .all()
+                == []
+            )
+
+
+def test_method_not_allowed_405_and_cors_headers(tmp_path: Path) -> None:
+    """Verify HTTP 405 ErrorResponse and CORS headers for allowed and disallowed origins."""
+    settings = make_isolated_settings(tmp_path)
+    app = create_app(
+        settings,
+        eager_load_embeddings=True,
+        embedding_service=DeterministicEmbeddingService(loaded=True),
+    )
+
+    with TestClient(app) as client:
+        err_patch = client.patch("/api/v1/documents")
+        _assert_error_response(err_patch, 405, "METHOD_NOT_ALLOWED")
+
+        err_put = client.put("/api/v1/health")
+        _assert_error_response(err_put, 405, "METHOD_NOT_ALLOWED")
+
+        # Allowed origin on standard GET.
+        allowed_get = client.get(
+            "/api/v1/health",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        assert allowed_get.status_code == 200
+        assert allowed_get.headers.get("access-control-allow-origin") == "http://localhost:3000"
+        assert allowed_get.headers.get("access-control-allow-credentials") == "true"
+
+        # Allowed origin preflight OPTIONS.
+        allowed_preflight = client.options(
+            "/api/v1/documents",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert allowed_preflight.status_code == 200
+        assert (
+            allowed_preflight.headers.get("access-control-allow-origin")
+            == "http://localhost:3000"
+        )
+        assert "POST" in (allowed_preflight.headers.get("access-control-allow-methods") or "")
+
+        # Disallowed origin must not receive Access-Control-Allow-Origin.
+        disallowed_get = client.get(
+            "/api/v1/health",
+            headers={"Origin": "http://evil.example.com"},
+        )
+        assert disallowed_get.status_code == 200
+        assert "access-control-allow-origin" not in disallowed_get.headers
+
+        disallowed_preflight = client.options(
+            "/api/v1/documents",
+            headers={
+                "Origin": "http://evil.example.com",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert disallowed_preflight.status_code == 400
+        assert "access-control-allow-origin" not in disallowed_preflight.headers
