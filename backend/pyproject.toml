@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docsense-backend"
+version = "0.1.0"
+description = "DocSense AI-powered document intelligence backend"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.162,<0.163",
+    "uvicorn[standard]>=0.54,<0.55",
+    "pydantic>=2.14,<3.0",
+    "pydantic-settings>=2.16,<3.0",
+    "sqlalchemy>=2.1,<3.0",
+    "pymupdf>=2.1,<2.2",
+    "sentence-transformers>=6.2,<6.3",
+    "torch>=2.15,<2.16",
+    "transformers>=5.22,<5.23",
+    "chromadb>=1.5,<1.6",
+    "python-multipart>=0.0.33,<0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.2,<9.3",
+    "httpx>=0.28,<0.29",
+    "ruff>=0.17,<0.18",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["app", "scripts", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "scripts"]
