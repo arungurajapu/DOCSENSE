@@ -239,7 +239,7 @@ describe("DocumentsDashboard", () => {
     expect(getDocumentsCalls).toBe(1);
 
     // Upload valid PDF -> 202 Pending
-    const input = screen.getByLabelText(/choose pdf file/i);
+    const input = screen.getByTestId("pdf-upload-input");
     const pdfFile = new File(["%PDF-1.4"], "manual.pdf", {
       type: "application/pdf",
     });
@@ -674,7 +674,7 @@ describe("DocumentsDashboard", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("1 document")).toBeInTheDocument();
 
-    const input = screen.getByLabelText(/choose pdf file/i);
+    const input = screen.getByTestId("pdf-upload-input");
     const pdfFile = new File(["%PDF-1.4"], "new-strict.pdf", {
       type: "application/pdf",
     });

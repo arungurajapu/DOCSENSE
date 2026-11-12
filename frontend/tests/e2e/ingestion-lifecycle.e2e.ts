@@ -46,7 +46,7 @@ test.describe("Ingestion Lifecycle, Pagination, Filters, and Delete", () => {
     );
     const [fileChooser] = await Promise.all([
       page.waitForEvent("filechooser"),
-      page.locator("button", { hasText: "Choose PDF file" }).click(),
+      page.getByRole("button", { name: "Choose PDF file" }).click(),
     ]);
     await fileChooser.setFiles(fixtures["multipage.pdf"]);
 
@@ -122,9 +122,12 @@ test.describe("Ingestion Lifecycle, Pagination, Filters, and Delete", () => {
     });
 
     // 3. Scanned zero-text PDF -> settles to Failed with EMPTY_PDF_NOT_SUPPORTED & Reprocess button
+    const chooseBtn = page.getByRole("button", { name: "Choose PDF file" });
+    await chooseBtn.focus();
+    await expect(chooseBtn).toBeFocused();
     const [scannedChooser] = await Promise.all([
       page.waitForEvent("filechooser"),
-      page.locator("button", { hasText: "Choose PDF file" }).click(),
+      chooseBtn.press("Enter"),
     ]);
     await scannedChooser.setFiles(fixtures["scanned.pdf"]);
 
