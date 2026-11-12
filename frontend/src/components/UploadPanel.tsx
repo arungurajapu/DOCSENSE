@@ -218,10 +218,12 @@ export function UploadPanel({
         <input
           ref={fileInputRef}
           id="pdf-upload-input"
+          data-testid="pdf-upload-input"
           type="file"
           accept=".pdf,application/pdf"
+          tabIndex={-1}
+          aria-hidden="true"
           disabled={isUploading}
-          aria-label="Choose PDF file"
           onChange={handleInputChange}
           className="sr-only"
         />

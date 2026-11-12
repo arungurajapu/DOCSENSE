@@ -35,7 +35,7 @@ describe("UploadPanel", () => {
       />,
     );
 
-    const input = screen.getByLabelText(/choose pdf file/i);
+    const input = screen.getByTestId("pdf-upload-input");
 
     const txtFile = new File(["hello"], "readme.txt", { type: "text/plain" });
     fireEvent.change(input, { target: { files: [txtFile] } });
@@ -153,7 +153,7 @@ describe("UploadPanel", () => {
       />,
     );
 
-    const input = screen.getByLabelText(/choose pdf file/i);
+    const input = screen.getByTestId("pdf-upload-input");
     const pdfFile = new File(["%PDF-1.4"], "test.pdf", {
       type: "application/pdf",
     });
@@ -173,5 +173,33 @@ describe("UploadPanel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "ENCRYPTED_PDF_NOT_SUPPORTED",
     );
+  });
+
+  it("exposes exactly one accessible 'Choose PDF file' button to assistive technologies and delegates keyboard activation to file input", async () => {
+    const user = userEvent.setup();
+    render(
+      <UploadPanel
+        maxSizeBytes={25 * 1024 * 1024}
+        maxSizeMb={25}
+        onUploadSuccess={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getAllByRole("button", { name: /choose pdf file/i }),
+    ).toHaveLength(1);
+
+    const input = screen.getByTestId("pdf-upload-input");
+    expect(input).toHaveAttribute("tabindex", "-1");
+    expect(input).toHaveAttribute("aria-hidden", "true");
+
+    const clickSpy = vi.spyOn(input, "click");
+    const chooseButton = screen.getByRole("button", { name: /choose pdf file/i });
+
+    chooseButton.focus();
+    expect(chooseButton).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    expect(clickSpy).toHaveBeenCalledTimes(1);
   });
 });
